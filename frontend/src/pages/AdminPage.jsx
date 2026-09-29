@@ -1,21 +1,81 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
-import { Lock, User, Plus, Trash2, Search, Sliders, Users, Shield } from 'lucide-react';
+import { Lock, User, Plus, Trash2, Search, Sliders, Users, Shield, Clock, AlertTriangle, Infinity as InfinityIcon, ShieldCheck } from 'lucide-react';
 import Modal from '../components/Modal';
+
+const STATUS_FILTERS = [
+  { key: 'all', label: '全部' },
+  { key: 'expiring_7d', label: '7天内到期' },
+  { key: 'expired', label: '已过期' },
+  { key: 'permanent', label: '长期有效' },
+];
+
+// 后台列表状态徽章：企业蓝为主，风险用橙色/红色点缀
+function StatusBadge({ item }) {
+  if (item.license_status === 'permanent') {
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-sky-500/10 text-sky-300 border border-sky-500/25">
+          <InfinityIcon className="w-3 h-3" /> 长期有效
+        </span>
+        <span className="text-xs text-white/40 font-mono">永久授权</span>
+      </div>
+    );
+  }
+
+  if (item.license_status === 'expired') {
+    const overdue = Math.abs(item.days_remaining ?? 0);
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/25">
+          <AlertTriangle className="w-3 h-3" /> 已过期
+        </span>
+        <span className="text-xs text-red-400/70 font-mono">
+          已逾期 {overdue} 天 · {new Date(item.expiration_date).toLocaleDateString()}
+        </span>
+      </div>
+    );
+  }
+
+  if (item.license_status === 'expiring') {
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-orange-500/10 text-orange-400 border border-orange-500/25">
+          <Clock className="w-3 h-3" /> 即将到期
+        </span>
+        <span className="text-xs text-orange-400/80 font-mono">
+          剩余 {item.days_remaining} 天 · {new Date(item.expiration_date).toLocaleDateString()}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+        <ShieldCheck className="w-3 h-3" /> 正常
+      </span>
+      <span className="text-xs text-white/40 font-mono">
+        剩余 {item.days_remaining} 天 · {new Date(item.expiration_date).toLocaleDateString()}
+      </span>
+    </div>
+  );
+}
 
 export default function AdminPage() {
   const [token, setToken] = useState(localStorage.getItem('auth_token'));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  
+
   // Dashboard State
   const [licenses, setLicenses] = useState([]);
   const [filteredLicenses, setFilteredLicenses] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  
+  const [statusFilter, setStatusFilter] = useState('all');
+
   const [newLicense, setNewLicense] = useState({
-    qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: ''
+    qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '', is_permanent: false
   });
 
   // Modal State
@@ -40,8 +100,8 @@ export default function AdminPage() {
       setFilteredLicenses(licenses);
     } else {
       const lower = searchTerm.toLowerCase();
-      setFilteredLicenses(licenses.filter(l => 
-        l.qq.includes(lower) || 
+      setFilteredLicenses(licenses.filter(l =>
+        l.qq.includes(lower) ||
         l.owner_name.toLowerCase().includes(lower) ||
         l.product_name.toLowerCase().includes(lower)
       ));
@@ -60,13 +120,19 @@ export default function AdminPage() {
     }
   };
 
-  const fetchLicenses = async () => {
+  const fetchLicenses = async (filter = statusFilter) => {
     try {
-      const res = await axios.get('/api/license/list');
+      const res = await axios.get('/api/license/list', { params: { filter } });
       setLicenses(res.data);
     } catch (err) {
       console.error(err);
+      toast.error('授权列表加载失败');
     }
+  };
+
+  const handleFilterChange = (key) => {
+    setStatusFilter(key);
+    fetchLicenses(key);
   };
 
   const handleCreate = async (e) => {
@@ -75,7 +141,7 @@ export default function AdminPage() {
       if (activeTab === 'license') {
           await axios.post('/api/license/create', newLicense);
           toast.success('授权添加成功');
-          setNewLicense({ qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '' });
+          setNewLicense({ qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '', is_permanent: false });
           fetchLicenses();
       } else {
           await axios.post('/api/auth/create', newAdmin);
@@ -216,8 +282,27 @@ export default function AdminPage() {
                         </div>
                         <div className="space-y-1">
                             <label className="text-xs text-white/40">过期时间</label>
-                            <input required type="datetime-local" className="glass-input w-full" value={newLicense.expiration_date} onChange={e=>setNewLicense({...newLicense, expiration_date:e.target.value})} />
+                            <input
+                                required={!newLicense.is_permanent}
+                                type="datetime-local"
+                                disabled={newLicense.is_permanent}
+                                className="glass-input w-full disabled:opacity-40 disabled:cursor-not-allowed"
+                                value={newLicense.expiration_date}
+                                onChange={e=>setNewLicense({...newLicense, expiration_date:e.target.value})}
+                            />
                         </div>
+                        <label className="flex items-center gap-2.5 cursor-pointer select-none pt-1">
+                            <input
+                                type="checkbox"
+                                className="w-4 h-4 rounded border-white/20 bg-white/5 text-sky-500 focus:ring-sky-500/40 accent-sky-500"
+                                checked={newLicense.is_permanent}
+                                onChange={e=>setNewLicense({...newLicense, is_permanent: e.target.checked, expiration_date: e.target.checked ? '' : newLicense.expiration_date})}
+                            />
+                            <span className="text-xs text-white/60 flex items-center gap-1">
+                                <InfinityIcon className="w-3.5 h-3.5 text-sky-400" />
+                                长期有效（无到期时间）
+                            </span>
+                        </label>
                      </>
                  ) : (
                      <>
@@ -243,28 +328,53 @@ export default function AdminPage() {
         {/* Main: Details List */}
         <div className="lg:col-span-3">
            <div className="glass-card overflow-hidden flex flex-col min-h-[600px]">
-             <div className="p-6 border-b border-white/5 flex justify-between items-center bg-white/5">
-                 <h3 className="font-bold flex items-center gap-2">
-                    {activeTab === 'license' ? <Sliders size={18} className="text-sky-400"/> : <Shield size={18} className="text-sky-400"/>}
-                    {activeTab === 'license' ? '授权列表' : '管理员列表'}
-                    <span className="px-2 py-0.5 rounded-full bg-white/10 text-xs text-white/60">
-                        {activeTab === 'license' ? filteredLicenses.length : admins.length}
-                    </span>
-                 </h3>
-                 <div className="flex space-x-2">
-                    <button 
-                        onClick={() => setActiveTab('license')}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'license' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
-                    >
-                        <Users className="inline-block w-4 h-4 mr-2" /> 授权管理
-                    </button>
-                    <button 
-                        onClick={() => setActiveTab('admin')}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'admin' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
-                    >
-                        <Shield className="inline-block w-4 h-4 mr-2" /> 管理员管理
-                    </button>
+             <div className="p-6 border-b border-white/5 bg-white/5">
+                 <div className="flex flex-col gap-4 md:flex-row md:justify-between md:items-center">
+                     <h3 className="font-bold flex items-center gap-2">
+                        {activeTab === 'license' ? <Sliders size={18} className="text-sky-400"/> : <Shield size={18} className="text-sky-400"/>}
+                        {activeTab === 'license' ? '授权列表' : '管理员列表'}
+                        <span className="px-2 py-0.5 rounded-full bg-white/10 text-xs text-white/60">
+                            {activeTab === 'license' ? filteredLicenses.length : admins.length}
+                        </span>
+                     </h3>
+                     <div className="flex space-x-2">
+                        <button
+                            onClick={() => setActiveTab('license')}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'license' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
+                        >
+                            <Users className="inline-block w-4 h-4 mr-2" /> 授权管理
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('admin')}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'admin' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
+                        >
+                            <Shield className="inline-block w-4 h-4 mr-2" /> 管理员管理
+                        </button>
+                     </div>
                  </div>
+                 {activeTab === 'license' && (
+                     <div className="flex flex-wrap gap-2 mt-4">
+                        {STATUS_FILTERS.map(f => (
+                            <button
+                                key={f.key}
+                                onClick={() => handleFilterChange(f.key)}
+                                className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition border ${
+                                    statusFilter === f.key
+                                        ? f.key === 'expired'
+                                            ? 'bg-red-500/15 text-red-300 border-red-500/30'
+                                            : f.key === 'expiring_7d'
+                                                ? 'bg-orange-500/15 text-orange-300 border-orange-500/30'
+                                                : f.key === 'permanent'
+                                                    ? 'bg-sky-500/20 text-sky-300 border-sky-500/30'
+                                                    : 'bg-white/15 text-white border-white/25'
+                                        : 'bg-white/5 text-white/50 border-white/5 hover:bg-white/10 hover:text-white/80'
+                                }`}
+                            >
+                                {f.label}
+                            </button>
+                        ))}
+                     </div>
+                 )}
              </div>
                           <div className="overflow-x-auto flex-1">
                 <table className="w-full text-left border-collapse">
@@ -320,12 +430,7 @@ export default function AdminPage() {
                                     <div className="text-xs text-white/40 mt-0.5">{item.upline}</div>
                                 </td>
                                 <td className="p-4">
-                                    <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20 mb-1">
-                                    正常
-                                    </div>
-                                    <div className="text-xs text-white/40 font-mono">
-                                    {new Date(item.expiration_date).toLocaleDateString()}
-                                    </div>
+                                    <StatusBadge item={item} />
                                 </td>
                               </>
                           ) : (

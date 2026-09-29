@@ -18,6 +18,8 @@ class Database {
             $this->conn = new PDO($dsn, $this->username, $this->password);
             $this->conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
             $this->conn->exec("set names utf8mb4");
+            // 与 PHP 端到期计算保持同一时区，避免筛选/状态出现时差
+            $this->conn->exec("SET time_zone = '+08:00'");
         } catch(PDOException $exception) {
             echo "Connection error: " . $exception->getMessage();
         }
