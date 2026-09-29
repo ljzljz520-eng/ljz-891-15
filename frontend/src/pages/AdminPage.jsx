@@ -1,21 +1,39 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
-import { Lock, User, Plus, Trash2, Search, Sliders, Users, Shield } from 'lucide-react';
+import { Lock, User, Plus, Trash2, Search, Sliders, Users, Shield, Clock, AlertTriangle, Infinity as InfinityIcon } from 'lucide-react';
 import Modal from '../components/Modal';
+
+// 七天内到期视为临期，与后端 EXPIRING_SOON_DAYS 保持一致
+const REMIND_DAYS = 7;
+
+// 计算授权状态：normal(正常) / expiring_soon(七天内到期) / expired(已过期) / permanent(长期有效)
+export function getLicenseStatus(item) {
+  if (Number(item.is_permanent) === 1 || !item.expiration_date) return 'permanent';
+  const diffDays = Math.ceil((new Date(String(item.expiration_date).replace(' ', 'T')).getTime() - Date.now()) / 86400000);
+  if (diffDays <= 0) return 'expired';
+  if (diffDays <= REMIND_DAYS) return 'expiring_soon';
+  return 'normal';
+}
+
+// 剩余天数（长期有效 / 已过期语义由调用方处理）
+export function getDaysLeft(item) {
+  return Math.ceil((new Date(String(item.expiration_date).replace(' ', 'T')).getTime() - Date.now()) / 86400000);
+}
 
 export default function AdminPage() {
   const [token, setToken] = useState(localStorage.getItem('auth_token'));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  
+
   // Dashboard State
   const [licenses, setLicenses] = useState([]);
   const [filteredLicenses, setFilteredLicenses] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  
+  const [statusFilter, setStatusFilter] = useState('all'); // all | expiring | expired | permanent
+
   const [newLicense, setNewLicense] = useState({
-    qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: ''
+    qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '', is_permanent: false
   });
 
   // Modal State
@@ -35,18 +53,36 @@ export default function AdminPage() {
     }
   }, [token]);
 
+  // 各状态的数量（基于全量数据，与搜索关键词无关）
+  const statusCounts = useMemo(() => {
+    const counts = { all: licenses.length, normal: 0, expiring: 0, expired: 0, permanent: 0 };
+    licenses.forEach(l => {
+      const s = getLicenseStatus(l);
+      if (s === 'expiring_soon') counts.expiring += 1;
+      else counts[s] += 1;
+    });
+    return counts;
+  }, [licenses]);
+
   useEffect(() => {
-    if (!searchTerm) {
-      setFilteredLicenses(licenses);
-    } else {
+    let list = licenses;
+    if (statusFilter !== 'all') {
+      list = list.filter(l => {
+        const s = getLicenseStatus(l);
+        if (statusFilter === 'expiring') return s === 'expiring_soon';
+        return s === statusFilter;
+      });
+    }
+    if (searchTerm) {
       const lower = searchTerm.toLowerCase();
-      setFilteredLicenses(licenses.filter(l => 
-        l.qq.includes(lower) || 
+      list = list.filter(l =>
+        l.qq.includes(lower) ||
         l.owner_name.toLowerCase().includes(lower) ||
         l.product_name.toLowerCase().includes(lower)
-      ));
+      );
     }
-  }, [searchTerm, licenses]);
+    setFilteredLicenses(list);
+  }, [searchTerm, statusFilter, licenses]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -75,7 +111,7 @@ export default function AdminPage() {
       if (activeTab === 'license') {
           await axios.post('/api/license/create', newLicense);
           toast.success('授权添加成功');
-          setNewLicense({ qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '' });
+          setNewLicense({ qq: '', owner_name: '', product_name: '', upline: '官方', expiration_date: '', is_permanent: false });
           fetchLicenses();
       } else {
           await axios.post('/api/auth/create', newAdmin);
@@ -216,7 +252,28 @@ export default function AdminPage() {
                         </div>
                         <div className="space-y-1">
                             <label className="text-xs text-white/40">过期时间</label>
-                            <input required type="datetime-local" className="glass-input w-full" value={newLicense.expiration_date} onChange={e=>setNewLicense({...newLicense, expiration_date:e.target.value})} />
+                            <div className="flex items-center justify-between gap-3 mb-2 px-3 py-2 rounded-lg bg-sky-500/10 border border-sky-500/20 cursor-pointer select-none"
+                                 onClick={() => setNewLicense({...newLicense, is_permanent: !newLicense.is_permanent})}>
+                                <span className="flex items-center gap-2 text-xs text-sky-300">
+                                    <InfinityIcon className="w-3.5 h-3.5" />
+                                    长期有效（永不过期）
+                                </span>
+                                <span className={`w-9 h-5 rounded-full relative transition ${newLicense.is_permanent ? 'bg-sky-500' : 'bg-white/15'}`}>
+                                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${newLicense.is_permanent ? 'left-4.5' : 'left-0.5'}`}
+                                          style={{left: newLicense.is_permanent ? '18px' : '2px'}}></span>
+                                </span>
+                            </div>
+                            <input
+                                required={!newLicense.is_permanent}
+                                type="datetime-local"
+                                disabled={newLicense.is_permanent}
+                                className="glass-input w-full disabled:opacity-30 disabled:cursor-not-allowed"
+                                value={newLicense.is_permanent ? '' : newLicense.expiration_date}
+                                onChange={e=>setNewLicense({...newLicense, expiration_date:e.target.value})}
+                            />
+                            {!newLicense.is_permanent && newLicense.expiration_date && (
+                                <ExpireHint dateStr={newLicense.expiration_date} />
+                            )}
                         </div>
                      </>
                  ) : (
@@ -252,13 +309,13 @@ export default function AdminPage() {
                     </span>
                  </h3>
                  <div className="flex space-x-2">
-                    <button 
+                    <button
                         onClick={() => setActiveTab('license')}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'license' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
                     >
                         <Users className="inline-block w-4 h-4 mr-2" /> 授权管理
                     </button>
-                    <button 
+                    <button
                         onClick={() => setActiveTab('admin')}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === 'admin' ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30' : 'bg-white/5 text-white/60 hover:bg-white/10 border border-white/5'}`}
                     >
@@ -266,6 +323,23 @@ export default function AdminPage() {
                     </button>
                  </div>
              </div>
+
+             {/* 到期状态筛选条 */}
+             {activeTab === 'license' && (
+                <div className="px-6 py-3 border-b border-white/5 bg-black/10 flex flex-wrap items-center gap-2">
+                   <span className="text-xs text-white/40 flex items-center gap-1.5 mr-1">
+                      <Sliders className="w-3.5 h-3.5" /> 到期筛选：
+                   </span>
+                   <FilterButton active={statusFilter === 'all'} onClick={() => setStatusFilter('all')}
+                      tone="sky" icon={Users} label="全部" count={statusCounts.all} />
+                   <FilterButton active={statusFilter === 'expiring'} onClick={() => setStatusFilter('expiring')}
+                      tone="orange" icon={Clock} label={`${REMIND_DAYS}天内到期`} count={statusCounts.expiring} />
+                   <FilterButton active={statusFilter === 'expired'} onClick={() => setStatusFilter('expired')}
+                      tone="red" icon={AlertTriangle} label="已过期" count={statusCounts.expired} />
+                   <FilterButton active={statusFilter === 'permanent'} onClick={() => setStatusFilter('permanent')}
+                      tone="blue" icon={InfinityIcon} label="长期有效" count={statusCounts.permanent} />
+                </div>
+             )}
                           <div className="overflow-x-auto flex-1">
                 <table className="w-full text-left border-collapse">
                   <thead>
@@ -295,7 +369,9 @@ export default function AdminPage() {
                     {(activeTab === 'license' ? filteredLicenses : admins).length === 0 ? (
                        <tr>
                          <td colSpan="6" className="p-12 text-center text-white/30">
-                            暂无数据
+                            {activeTab === 'license' && statusFilter !== 'all'
+                              ? '当前筛选条件下暂无授权记录'
+                              : '暂无数据'}
                          </td>
                        </tr>
                     ) : (
@@ -320,11 +396,11 @@ export default function AdminPage() {
                                     <div className="text-xs text-white/40 mt-0.5">{item.upline}</div>
                                 </td>
                                 <td className="p-4">
-                                    <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20 mb-1">
-                                    正常
-                                    </div>
-                                    <div className="text-xs text-white/40 font-mono">
-                                    {new Date(item.expiration_date).toLocaleDateString()}
+                                    <StatusBadge item={item} />
+                                    <div className="text-xs text-white/40 font-mono mt-1">
+                                    {Number(item.is_permanent) === 1 || !item.expiration_date
+                                        ? '无到期时间'
+                                        : new Date(item.expiration_date.replace(' ', 'T')).toLocaleDateString()}
                                     </div>
                                 </td>
                               </>
@@ -382,4 +458,70 @@ export default function AdminPage() {
       />
     </div>
   );
+}
+
+// 状态筛选按钮：企业蓝为默认选中色，风险类用橙色/红色点缀
+function FilterButton({ active, onClick, tone, icon: Icon, label, count }) {
+  const tones = {
+    sky:    active ? 'bg-sky-500/20 text-sky-300 border-sky-500/40' : 'text-white/50 hover:text-sky-300 border-white/5 hover:border-sky-500/25',
+    blue:   active ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'text-white/50 hover:text-blue-300 border-white/5 hover:border-blue-500/25',
+    orange: active ? 'bg-orange-500/20 text-orange-300 border-orange-500/40' : 'text-white/50 hover:text-orange-300 border-white/5 hover:border-orange-500/25',
+    red:    active ? 'bg-red-500/20 text-red-300 border-red-500/40' : 'text-white/50 hover:text-red-300 border-white/5 hover:border-red-500/25',
+  };
+  const countTones = {
+    sky: active ? 'bg-sky-500/30 text-sky-200' : 'bg-white/10 text-white/40',
+    blue: active ? 'bg-blue-500/30 text-blue-200' : 'bg-white/10 text-white/40',
+    orange: active ? 'bg-orange-500/30 text-orange-200' : 'bg-white/10 text-white/40',
+    red: active ? 'bg-red-500/30 text-red-200' : 'bg-white/10 text-white/40',
+  };
+  return (
+    <button onClick={onClick}
+      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5 ${tones[tone]}`}>
+      <Icon className="w-3.5 h-3.5" />
+      {label}
+      <span className={`px-1.5 py-px rounded-full text-[10px] font-bold ${countTones[tone]}`}>{count}</span>
+    </button>
+  );
+}
+
+// 授权状态徽标：正常-企业蓝；临期-橙色；过期-红色；长期-蓝色∞
+function StatusBadge({ item }) {
+  const status = getLicenseStatus(item);
+  const days = Number(item.is_permanent) === 1 || !item.expiration_date ? null : getDaysLeft(item);
+
+  const config = {
+    normal: (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-sky-500/10 text-sky-300 border border-sky-500/20">
+        <Shield className="w-3 h-3" /> 正常可用 · 剩余 {days} 天
+      </span>
+    ),
+    expiring_soon: (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-orange-500/15 text-orange-300 border border-orange-500/30 animate-pulse-soft">
+        <Clock className="w-3 h-3" /> {days === 0 ? '今日到期' : `${days} 天后到期`}
+      </span>
+    ),
+    expired: (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/30">
+        <AlertTriangle className="w-3 h-3" /> 已过期 {Math.abs(days)} 天
+      </span>
+    ),
+    permanent: (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30">
+        <InfinityIcon className="w-3 h-3" /> 长期有效
+      </span>
+    ),
+  };
+  return config[status];
+}
+
+// 新增表单中选择过期时间后的即时提示
+function ExpireHint({ dateStr }) {
+  const days = Math.ceil((new Date(dateStr).getTime() - Date.now()) / 86400000);
+  if (days < 0) {
+    return <p className="text-[11px] text-red-400 flex items-center gap-1 mt-1"><AlertTriangle className="w-3 h-3" />该时间已过期，请重新选择</p>;
+  }
+  if (days <= REMIND_DAYS) {
+    return <p className="text-[11px] text-orange-300 flex items-center gap-1 mt-1"><Clock className="w-3 h-3" />距到期仅 {days} 天，将进入到期提醒</p>;
+  }
+  return <p className="text-[11px] text-white/30 flex items-center gap-1 mt-1"><Clock className="w-3 h-3" />距到期还有 {days} 天</p>;
 }

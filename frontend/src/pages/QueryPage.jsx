@@ -1,7 +1,23 @@
 import React, { useState } from 'react';
-import { Search, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Search, ShieldCheck, AlertCircle, Clock, Infinity as InfinityIcon, ShieldX } from 'lucide-react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
+
+// 前端兜底状态计算（与后端响应字段 license_status 一致）
+function resolveStatus(r) {
+  if (r.license_status) return r.license_status;
+  if (r.is_permanent || !r.expiration) return 'permanent';
+  const days = Math.ceil((new Date(r.expiration.replace(' ', 'T')).getTime() - Date.now()) / 86400000);
+  if (days <= 0) return 'expired';
+  if (days <= 7) return 'expiring_soon';
+  return 'normal';
+}
+
+function formatDateTime(v) {
+  if (!v) return '—';
+  const d = new Date(typeof v === 'string' ? v.replace(' ', 'T') : v);
+  return d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
 
 export default function QueryPage() {
   const [qq, setQq] = useState('');
@@ -23,7 +39,10 @@ export default function QueryPage() {
     try {
       const res = await axios.get(`/api/license/query?qq=${qq}&owner=${owner}`);
       setResult(res.data.data);
-      toast.success('查询成功');
+      const st = res.data.data.license_status;
+      if (st === 'expired') toast.error('该授权已过期');
+      else if (st === 'expiring_soon') toast('授权即将到期，请及时续费', { icon: '⚠️' });
+      else toast.success('查询成功');
     } catch (err) {
        if(err.response && err.response.data && err.response.data.reasons) {
            setError(err.response.data);
@@ -96,28 +115,98 @@ export default function QueryPage() {
          </div>
        </div>
 
-       {result && (
-         <div className="glass-card p-8 border-l-4 border-l-green-500 animate-fade-in-up">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="p-2 bg-green-500/20 rounded-full text-green-400">
-                <ShieldCheck size={32} />
+       {result && (() => {
+         const status = resolveStatus(result);
+         const isExpired = status === 'expired';
+         const isExpiring = status === 'expiring_soon';
+         const isPermanent = status === 'permanent';
+
+         const header = {
+           normal: {
+             border: 'border-l-sky-500',
+             iconWrap: 'bg-sky-500/20 text-sky-400',
+             icon: <ShieldCheck size={32} />,
+             title: '查询成功',
+             sub: '正版授权保障 · 授权正常可用',
+             subClass: 'text-sky-300',
+           },
+           expiring_soon: {
+             border: 'border-l-orange-400',
+             iconWrap: 'bg-orange-500/20 text-orange-300',
+             icon: <Clock size={32} />,
+             title: '授权即将到期',
+             sub: '正版授权，请及时联系上级续费',
+             subClass: 'text-orange-300',
+           },
+           expired: {
+             border: 'border-l-red-500',
+             iconWrap: 'bg-red-500/20 text-red-400',
+             icon: <ShieldX size={32} />,
+             title: '授权已过期',
+             sub: '该授权已失效，无法继续正常使用',
+             subClass: 'text-red-400',
+           },
+           permanent: {
+             border: 'border-l-blue-500',
+             iconWrap: 'bg-blue-500/20 text-blue-300',
+             icon: <InfinityIcon size={32} />,
+             title: '查询成功',
+             sub: '正版授权保障 · 长期有效',
+             subClass: 'text-blue-300',
+           },
+         }[status];
+
+         return (
+           <div className={`glass-card p-8 border-l-4 ${header.border} animate-fade-in-up`}>
+              <div className="flex items-center gap-3 mb-6">
+                <div className={`p-2 rounded-full ${header.iconWrap}`}>
+                  {header.icon}
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white">{header.title}</h3>
+                  <p className={`text-sm ${header.subClass}`}>{header.sub}</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-xl font-bold text-white">查询成功</h3>
-                <p className="text-green-400 text-sm">正版授权保障</p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                 <ResultItem label="授权QQ" value={result.qq} />
+                 <ResultItem label="授权主人" value={result.owner} />
+                 <ResultItem label="所属产品" value={result.product} />
+                 <ResultItem label="授权上级" value={result.upline} />
+                 <ResultItem label="开通时间" value={formatDateTime(result.created_at)} />
+                 <ResultItem
+                   label="授权有效期至"
+                   value={isPermanent ? '长期有效' : formatDateTime(result.expiration)}
+                 />
               </div>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-               <ResultItem label="授权QQ" value={result.qq} />
-               <ResultItem label="授权主人" value={result.owner} />
-               <ResultItem label="所属产品" value={result.product} />
-               <ResultItem label="授权上级" value={result.upline} />
-               <ResultItem label="开通时间" value={result.created_at} />
-               <ResultItem label="授权有效期" value={result.expiration} />
-            </div>
-         </div>
-       )}
+
+              {/* 剩余天数提醒条 */}
+              <div className="mt-5">
+                {isPermanent ? (
+                  <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-blue-500/10 border border-blue-500/25 text-blue-200 text-sm font-medium">
+                    <InfinityIcon size={18} className="text-blue-300" />
+                    剩余有效期：长期有效，无到期时间
+                  </div>
+                ) : isExpired ? (
+                  <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm font-medium">
+                    <ShieldX size={18} />
+                    该授权已过期 {Math.abs(result.days_left ?? 0)} 天，当前不可用，请联系上级代理续费
+                  </div>
+                ) : isExpiring ? (
+                  <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-orange-500/10 border border-orange-500/30 text-orange-200 text-sm font-medium animate-pulse-soft">
+                    <Clock size={18} className="text-orange-300" />
+                    剩余 <span className="text-orange-300 font-bold text-base px-1">{result.days_left}</span> 天到期，请尽快续费以免影响使用
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-sky-500/10 border border-sky-500/25 text-sky-200 text-sm font-medium">
+                    <ShieldCheck size={18} className="text-sky-300" />
+                    剩余有效期：<span className="text-sky-300 font-bold text-base px-1">{result.days_left}</span> 天
+                  </div>
+                )}
+              </div>
+           </div>
+         );
+       })()}
 
        {error && (
          <div className="glass-card p-8 border-l-4 border-l-red-500 animate-pulse-soft">

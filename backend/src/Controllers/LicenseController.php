@@ -7,8 +7,44 @@ use PDO;
 class LicenseController {
     private $db;
 
+    // 距到期不足该天数即触发提醒
+    const EXPIRING_SOON_DAYS = 7;
+
     public function __construct($db) {
         $this->db = $db;
+    }
+
+    /**
+     * 计算授权到期状态
+     * @return array status: normal|expiring_soon|expired|permanent, days_left, is_expired, is_permanent
+     */
+    private function getExpiryStatus($row) {
+        $isPermanent = !empty($row['is_permanent']) || empty($row['expiration_date']);
+
+        if ($isPermanent) {
+            return [
+                'status'        => 'permanent',
+                'is_permanent'  => true,
+                'is_expired'    => false,
+                'expiring_soon' => false,
+                'days_left'     => null,
+            ];
+        }
+
+        $expireTs   = strtotime($row['expiration_date']);
+        $nowTs      = time();
+        // 剩余整天数（向上取整，到期当天显示剩余 0 天）
+        $diffSec    = $expireTs - $nowTs;
+        $daysLeft   = (int) floor($diffSec / 86400);
+        $isExpired  = $diffSec <= 0;
+
+        return [
+            'status'        => $isExpired ? 'expired' : ($daysLeft <= self::EXPIRING_SOON_DAYS ? 'expiring_soon' : 'normal'),
+            'is_permanent'  => false,
+            'is_expired'    => $isExpired,
+            'expiring_soon' => !$isExpired && $daysLeft <= self::EXPIRING_SOON_DAYS,
+            'days_left'     => $isExpired ? abs((int) ceil($diffSec / 86400)) : $daysLeft,
+        ];
     }
 
     // Public Query
@@ -30,11 +66,8 @@ class LicenseController {
 
         if ($stmt->rowCount() > 0) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            // Check if expired logic? The prompt says just show info.
-            // But prompt also lists reasons for failure: "1.授权开通不足60分钟内" (implies < 60 mins from creation?) - this is weird, maybe it means 'just created'? or 'not synced'?
-            // Usually "Authorization not found" reasons are generic boilerplate.
-            // Let's just return the data.
-            
+            $expiry = $this->getExpiryStatus($row);
+
             http_response_code(200);
             echo json_encode([
                 "status" => "success",
@@ -44,7 +77,14 @@ class LicenseController {
                     "product" => $row['product_name'],
                     "upline" => $row['upline'],
                     "expiration" => $row['expiration_date'],
-                    "created_at" => $row['created_at']
+                    "created_at" => $row['created_at'],
+                    // —— 到期提醒信息 ——
+                    "license_status" => $expiry['status'],         // normal / expiring_soon / expired / permanent
+                    "is_permanent"    => $expiry['is_permanent'],
+                    "is_expired"      => $expiry['is_expired'],
+                    "expiring_soon"   => $expiry['expiring_soon'],
+                    "days_left"       => $expiry['days_left'],    // 剩余天数；长期有效为 null
+                    "remind_within_days" => self::EXPIRING_SOON_DAYS
                 ]
             ]);
         } else {
@@ -62,30 +102,86 @@ class LicenseController {
         }
     }
 
-    // Admin: List All
+    // Admin: List All（支持 ?filter=all|expiring|expired|permanent）
     public function listAll() {
-        $query = "SELECT * FROM licenses ORDER BY created_at DESC";
+        $filter = isset($_GET['filter']) ? $_GET['filter'] : 'all';
+
+        $query = "SELECT * FROM licenses";
+        $conditions = [];
+
+        // 筛选尽量下推到 SQL，同时前端也会基于状态字段二次过滤
+        switch ($filter) {
+            case 'expiring':
+                // 七天内到期：非长期、未过期、到期时间在 7 天以内
+                $conditions[] = "(is_permanent = 0 AND expiration_date IS NOT NULL
+                                  AND expiration_date > NOW()
+                                  AND expiration_date <= DATE_ADD(NOW(), INTERVAL " . (int)self::EXPIRING_SOON_DAYS . " DAY))";
+                break;
+            case 'expired':
+                $conditions[] = "(is_permanent = 0 AND expiration_date IS NOT NULL AND expiration_date <= NOW())";
+                break;
+            case 'permanent':
+                $conditions[] = "(is_permanent = 1 OR expiration_date IS NULL)";
+                break;
+            default:
+                break;
+        }
+
+        if (!empty($conditions)) {
+            $query .= " WHERE " . implode(' AND ', $conditions);
+        }
+        $query .= " ORDER BY is_permanent ASC, expiration_date ASC, created_at DESC";
+
         $stmt = $this->db->prepare($query);
         $stmt->execute();
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // 附加计算字段，便于后台直接渲染徽标与剩余天数
+        foreach ($rows as &$r) {
+            $expiry = $this->getExpiryStatus($r);
+            $r['license_status'] = $expiry['status'];
+            $r['is_permanent_computed'] = $expiry['is_permanent'];
+            $r['is_expired_computed']   = $expiry['is_expired'];
+            $r['expiring_soon']         = $expiry['expiring_soon'];
+            $r['days_left']             = $expiry['days_left'];
+        }
+        unset($r);
+
         echo json_encode($rows);
     }
 
     // Admin: Create
     public function create() {
         $data = json_decode(file_get_contents("php://input"));
-        // Need: qq, owner_name, product_name, upline, expiration_date
-        $query = "INSERT INTO licenses (qq, owner_name, product_name, upline, expiration_date) VALUES (:qq, :owner, :product, :upline, :exp)";
+        $isPermanent = !empty($data->is_permanent);
+
+        // datetime-local 提交格式为 "2026-12-31T23:59"，转换为 MySQL 格式；长期有效则为 NULL
+        $expiration = null;
+        if (!$isPermanent) {
+            if (!isset($data->expiration_date) || trim($data->expiration_date) === '') {
+                http_response_code(400);
+                echo json_encode(["message" => "请选择过期时间，或勾选长期有效"]);
+                return;
+            }
+            $expiration = str_replace('T', ' ', $data->expiration_date);
+            if (strlen($expiration) === 16) {
+                $expiration .= ':00';
+            }
+        }
+
+        $query = "INSERT INTO licenses (qq, owner_name, product_name, upline, expiration_date, is_permanent)
+                  VALUES (:qq, :owner, :product, :upline, :exp, :permanent)";
         $stmt = $this->db->prepare($query);
-        
+
         $params = [
             ":qq" => $data->qq,
             ":owner" => $data->owner_name,
             ":product" => $data->product_name,
             ":upline" => $data->upline,
-            ":exp" => $data->expiration_date
+            ":exp" => $expiration,
+            ":permanent" => $isPermanent ? 1 : 0,
         ];
-        
+
         if($stmt->execute($params)) {
              echo json_encode(["message" => "Created successfully"]);
         } else {
